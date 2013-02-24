@@ -3,6 +3,7 @@ import time
 import datetime
 import traceback
 import string
+import xml.dom.minidom
 
 
 from starcluster import utils
@@ -146,9 +147,7 @@ class SGEStats(object):
         calculates some statistics.
         Takes the string to parse, and a datetime object of the remote
         host's current time.
-        """
-
-                
+        """                
         jobstats,num_new_jobs = sge_utils.parse_qacct(string,dtnow)
         for (jobid,hash) in jobstats.values():
             self.max_job_id = jobid
@@ -261,7 +260,7 @@ class SGEStats(object):
         count = 0
         total_seconds = 0
         for job in self.jobstats:
-            if job != None:
+            if job is not None:
                 delta = job['end'] - job['start']
                 total_seconds += delta.seconds
                 count += 1
@@ -274,7 +273,7 @@ class SGEStats(object):
         count = 0
         total_seconds = 0
         for job in self.jobstats:
-            if job != None:
+            if job is not None:
                 delta = job['start'] - job['queued']
                 total_seconds += delta.seconds
                 count += 1
@@ -425,7 +424,7 @@ class SGELoadBalancer(LoadBalancer):
             raise ValueError, 'Host group name must start with "@".'
         self.host_group = host_group
         self.slots = slots
-        
+
 
     @property
     def visualizer(self):
@@ -504,16 +503,9 @@ class SGELoadBalancer(LoadBalancer):
         qatime = self.get_qatime(now)
         qacct_cmd = 'qacct -j -b ' + qatime
         qstat_cmd = 'qstat -u \* -xml'
-        qhostxml = '\n'.join(master.ssh.execute('qhost -xml',
-                                                log_output=True,
-                                                source_profile=True,
-                                                raise_on_failure=True))
-        qstatxml = '\n'.join(master.ssh.execute(qstat_cmd, log_output=True,
-                                                source_profile=True,
-                                                raise_on_failure=True))
-        qacct = '\n'.join(master.ssh.execute(qacct_cmd, log_output=True,
-                                             ignore_exit_status=True,
-                                             source_profile=True))
+        qhostxml = '\n'.join(master.ssh.execute('qhost -xml'))
+        qstatxml = '\n'.join(master.ssh.execute(qstat_cmd))
+        qacct = '\n'.join(master.ssh.execute(qacct_cmd))
         stats = SGEStats()
         stats.parse_qhost(qhostxml)
         stats.parse_qstat(qstatxml, queues=["all.q", ""])
@@ -539,8 +531,7 @@ class SGELoadBalancer(LoadBalancer):
                 return self.stat
             except Exception:
                 log.warn("Failed to retrieve stats (%d/%d):" %
-                         (i + 1, retries))
-                log.debug(traceback.format_exc())
+                         (i + 1, retries), exc_info=True)
                 log.warn("Retrying in %ds" % self.polling_interval)
                 time.sleep(self.polling_interval)
         raise exception.BaseException(
@@ -740,8 +731,7 @@ class SGELoadBalancer(LoadBalancer):
                 log.info("Done adding nodes at %s" %
                          str(datetime.datetime.utcnow()))
             except Exception:
-                log.error("Failed to add new host")
-                log.debug(traceback.format_exc())
+                log.error("Failed to add new host", exc_info=True)
 
     def _eval_remove_node(self):
         """
@@ -773,8 +763,8 @@ class SGELoadBalancer(LoadBalancer):
                 self._cluster.remove_node(node)
                 self.__last_cluster_mod_time = datetime.datetime.utcnow()
             except Exception:
-                log.error("Failed to remove node %s" % node.alias)
-                log.debug(traceback.format_exc())
+                log.error("Failed to remove node %s" % node.alias,
+                          exc_info=True)
 
     def _eval_terminate_cluster(self):
         """

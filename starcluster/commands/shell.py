@@ -109,7 +109,8 @@ class CmdShell(CmdBase):
                                       'ipcontroller-client.json')
                 if cl.master_node.ssh.isfile(json):
                     log.info("Fetching connector file from cluster...")
-                    os.makedirs(ipcluster_dir)
+                    if not os.path.exists(ipcluster_dir):
+                        os.makedirs(ipcluster_dir)
                     cl.master_node.ssh.get(json, local_json)
                 else:
                     self.parser.error(
@@ -126,7 +127,7 @@ class CmdShell(CmdBase):
             local_ns['ipview'] = rc[:]
         modules = [(starcluster.__name__ + '.' + module, module)
                    for module in starcluster.__all__]
-        modules += [('boto', 'boto'), ('ssh', 'ssh'),
+        modules += [('boto', 'boto'), ('paramiko', 'paramiko'),
                     ('workerpool', 'workerpool'), ('jinja2', 'jinja2')]
         for fullname, modname in modules:
             log.info('Importing module %s' % modname)

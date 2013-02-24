@@ -73,13 +73,13 @@ STARTED_MSG_11 = """\
 IPCluster has been started on %(cluster)s for user '%(user)s'.
 
 See the IPCluster plugin doc for usage details:
-http://web.mit.edu/starcluster/docs/latest/plugins/ipython.html
+http://star.mit.edu/cluster/docs/latest/plugins/ipython.html
 """
 
 
 class IPCluster11(ClusterSetup):
     """
-    Start an IPython (0.11) cluster
+    Start an IPython (>= 0.11) cluster
     """
     def __init__(self, enable_notebook=False, notebook_passwd=None):
         self.enable_notebook = enable_notebook
@@ -110,6 +110,29 @@ class IPCluster11(ClusterSetup):
             "c.SGEControllerLauncher.queue='all.q@master'",
             "c.IPClusterEngines.engine_launcher_class='SGEEngineSetLauncher'",
             # "c.Application.log_level = 'DEBUG'",
+            "",
+            # workaround IPython bug #2171 in IPython 0.13
+            "controller_template = '''",
+            "#$ -V",
+            "#$ -q all.q@master",
+            "#$ -S /bin/sh",
+            "#$ -N ipcontroller",
+            'ipcontroller --log-to-file --profile-dir="{profile_dir}" '
+            '--cluster-id="{cluster_id}"',
+            "'''",
+            "engine_template = '''",
+            "#$ -V",
+            "#$ -t 1-{n}",
+            "#$ -S /bin/sh",
+            "#$ -N ipengine",
+            'ipengine --log-to-file --profile-dir="{profile_dir}" '
+            '--cluster-id="{cluster_id}"',
+            "'''",
+            # only apply workaround for affected version 0.13:
+            "import IPython",
+            "if IPython.__version__ == '0.13':",
+            "    c.SGEControllerLauncher.batch_template = controller_template",
+            "    c.SGEEngineSetLauncher.batch_template = engine_template",
             "",
         ]))
         f.close()
@@ -149,17 +172,18 @@ class IPCluster11(ClusterSetup):
         log.info("Starting IPython cluster with %i engines" % n)
         # cleanup existing connection files, to prevent their use
         master.ssh.execute("rm -f %s/security/*.json" % profile_dir)
-        master.ssh.execute("ipcluster start --n=%i --delay=5 --daemonize" % n,
-                           source_profile=True)
+        master.ssh.execute("ipcluster start --n=%i --delay=5 --daemonize" % n)
         # wait for JSON file to exist
         json = '%s/security/ipcontroller-client.json' % profile_dir
         log.info("Waiting for JSON connector file...",
                  extra=dict(__nonewline__=True))
         s = spinner.Spinner()
         s.start()
-        while not master.ssh.isfile(json):
-            time.sleep(1)
-        s.stop()
+        try:
+            while not master.ssh.isfile(json):
+                time.sleep(5)
+        finally:
+            s.stop()
         # retrieve JSON connection info
         if not os.path.isdir(IPCLUSTER_CACHE):
             log.info("Creating IPCluster cache directory: %s" %
@@ -240,8 +264,7 @@ class IPCluster11(ClusterSetup):
     def on_add_node(self, node, nodes, master, user, user_shell, volumes):
         n = node.num_processors
         log.info("Adding %i engines on %s to ipcluster" % (n, node.alias))
-        node.ssh.execute("ipcluster engines --n=%i --daemonize" % n,
-                         source_profile=True)
+        node.ssh.execute("ipcluster engines --n=%i --daemonize" % n)
 
 
 class IPCluster(ClusterSetup):
@@ -293,7 +316,7 @@ class IPClusterStop(ClusterSetup):
     def run(self, nodes, master, user, user_shell, volumes):
         log.info("Shutting down IPython cluster")
         master.ssh.switch_user(user)
-        master.ssh.execute("ipcluster stop", source_profile=True)
+        master.ssh.execute("ipcluster stop")
         time.sleep(2)
         master.ssh.execute("pkill -f ipcontrollerapp.py",
                            ignore_exit_status=True)

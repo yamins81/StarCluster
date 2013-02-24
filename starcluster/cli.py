@@ -9,7 +9,6 @@ import shlex
 import socket
 import optparse
 import platform
-import traceback
 
 from boto.exception import BotoServerError, EC2ResponseError, S3ResponseError
 
@@ -19,11 +18,11 @@ from starcluster import logger
 from starcluster import commands
 from starcluster import exception
 from starcluster import optcomplete
-from starcluster.logger import log, console, session
+from starcluster.logger import log, console
 from starcluster import __version__
 
 __description__ = """
-StarCluster - (http://web.mit.edu/starcluster) (v. %s)
+StarCluster - (http://star.mit.edu/cluster) (v. %s)
 Software Tools for Academics and Researchers (STAR)
 Please submit bug reports to starcluster@mit.edu
 """ % __version__
@@ -44,7 +43,7 @@ class StarClusterCLI(object):
         return self._gparser
 
     def print_header(self):
-        print __description__.replace('\n', '', 1)
+        print >> sys.stderr, __description__.replace('\n', '', 1)
 
     def parse_subcommands(self, gparser=None):
         """
@@ -67,6 +66,7 @@ class StarClusterCLI(object):
         # set debug level if specified
         if gopts.DEBUG:
             console.setLevel(logger.DEBUG)
+            config.DEBUG_CONFIG = True
         # load StarClusterConfig into global options
         try:
             cfg = config.StarClusterConfig(gopts.CONFIG)
@@ -148,20 +148,22 @@ class StarClusterCLI(object):
         dashes = '-' * 10
         header = dashes + ' %s ' + dashes + '\n'
         crashfile = open(static.CRASH_FILE, 'w')
-        crashfile.write(header % "CRASH DETAILS")
         argv = sys.argv[:]
         argv[0] = os.path.basename(argv[0])
         argv = ' '.join(argv)
-        crashfile.write('COMMAND: %s\n' % argv)
-        crashfile.write(session.stream.getvalue())
         crashfile.write(header % "SYSTEM INFO")
         crashfile.write("StarCluster: %s\n" % __version__)
         crashfile.write("Python: %s\n" % sys.version.replace('\n', ' '))
         crashfile.write("Platform: %s\n" % platform.platform())
-        dependencies = ['boto', 'ssh', 'Crypto', 'jinja2', 'decorator']
+        dependencies = ['boto', 'paramiko', 'Crypto']
         for dep in dependencies:
             self.__write_module_version(dep, crashfile)
+        crashfile.write("\n" + header % "CRASH DETAILS")
+        crashfile.write('Command: %s\n\n' % argv)
+        for line in logger.get_session_log():
+            crashfile.write(line)
         crashfile.close()
+        print
         log.error("Oops! Looks like you've found a bug in StarCluster")
         log.error("Crash report written to: %s" % static.CRASH_FILE)
         log.error("Please remove any sensitive data from the crash report")
@@ -254,21 +256,23 @@ class StarClusterCLI(object):
         try:
             sc.execute(args)
         except (EC2ResponseError, S3ResponseError, BotoServerError), e:
-            log.error("%s: %s" % (e.error_code, e.error_message))
+            log.error("%s: %s" % (e.error_code, e.error_message),
+                      exc_info=True)
             sys.exit(1)
         except socket.error, e:
-            log.error("Unable to connect: %s" % e)
+            log.exception("Connection error:")
             log.error("Check your internet connection?")
             sys.exit(1)
         except exception.ThreadPoolException, e:
-            if not gopts.DEBUG:
-                e.print_excs()
-            log.debug(e.format_excs())
-            print
+            log.error(e.format_excs())
             self.bug_found()
         except exception.ClusterDoesNotExist, e:
             cm = gopts.CONFIG.get_cluster_manager()
-            cls = cm.get_clusters()
+            cls = ''
+            try:
+                cls = cm.get_clusters(load_plugins=False, load_receipt=False)
+            except:
+                log.debug("Error fetching cluster list", exc_info=True)
             log.error(e.msg)
             if cls:
                 taglist = ', '.join([c.cluster_tag for c in cls])
@@ -282,10 +286,7 @@ class StarClusterCLI(object):
             # re-raise SystemExit to avoid the bug-catcher below
             raise
         except Exception:
-            if not gopts.DEBUG:
-                traceback.print_exc()
-            log.debug(traceback.format_exc())
-            print
+            log.error("Unhandled exception occured", exc_info=True)
             self.bug_found()
 
 

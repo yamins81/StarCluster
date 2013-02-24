@@ -2,19 +2,21 @@
 import os
 import sys
 
-if sys.version_info < (2, 5):
-    error = "ERROR: StarCluster requires Python 2.5+ ... exiting."
+if sys.version_info < (2, 6):
+    error = "ERROR: StarCluster requires Python 2.6+ ... exiting."
     print >> sys.stderr, error
     sys.exit(1)
 
 try:
     from setuptools import setup, find_packages
+    setup
+    find_packages
     console_scripts = ['starcluster = starcluster.cli:main']
     extra = dict(test_suite="starcluster.tests",
                  tests_require="nose",
-                 install_requires=["ssh==1.7.13", "boto==2.3.0",
-                                   "workerpool==0.9.2", "Jinja2==2.6",
-                                   "decorator==3.3.1", "pyasn1==0.0.13b"],
+                 install_requires=["paramiko>=1.9.0", "boto>=2.8.0",
+                                   "workerpool>=0.9.2", "Jinja2>=2.6",
+                                   "decorator>=3.4.0", "pyasn1>=0.1.6"],
                  include_package_data=True,
                  entry_points=dict(console_scripts=console_scripts),
                  zip_safe=False)
@@ -53,8 +55,9 @@ except ImportError:
             where, prefix = stack.pop(0)
             for name in os.listdir(where):
                 fn = os.path.join(where, name)
-                if ('.' not in name and os.path.isdir(fn) and
-                    os.path.isfile(os.path.join(fn, '__init__.py'))):
+                isdir = os.path.isdir(fn)
+                has_init = os.path.isfile(os.path.join(fn, '__init__.py'))
+                if '.' not in name and isdir and has_init:
                     out.append(prefix + name)
                     stack.append((fn, prefix + name + '.'))
         for pat in list(exclude) + ['ez_setup', 'distribute_setup']:
@@ -80,7 +83,7 @@ setup(
     license='LGPL3',
     author='Justin Riley',
     author_email='justin.t.riley@gmail.com',
-    url="http://web.mit.edu/starcluster",
+    url="http://star.mit.edu/cluster",
     description="StarCluster is a utility for creating and managing computing "
     "clusters hosted on Amazon's Elastic Compute Cloud (EC2).",
     long_description=README,
