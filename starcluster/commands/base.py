@@ -1,7 +1,6 @@
 import os
 import sys
 import time
-import signal
 from starcluster import node
 from starcluster import cluster
 from starcluster import optcomplete
@@ -43,14 +42,14 @@ class CmdBase(optcomplete.CmdComplete):
         """
         Returns global options dictionary
         """
-        return dict(self.gopts.__dict__)
+        return dict(getattr(self.gopts, '__dict__', {}))
 
     @property
     def options_dict(self):
         """
         Returns dictionary of options for this command
         """
-        return dict(self.opts.__dict__)
+        return dict(getattr(self.opts, '__dict__', {}))
 
     @property
     def specified_options_dict(self):
@@ -130,13 +129,6 @@ class CmdBase(optcomplete.CmdComplete):
         print
         log.info("Exiting...")
         sys.exit(1)
-
-    def catch_ctrl_c(self, handler=None):
-        """
-        Catch ctrl-c interrupt
-        """
-        handler = handler or self.cancel_command
-        signal.signal(signal.SIGINT, handler)
 
     def warn_experimental(self, msg, num_secs=10):
         """

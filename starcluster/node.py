@@ -1,3 +1,4 @@
+import re
 import time
 import stat
 import base64
@@ -9,6 +10,7 @@ from starcluster import static
 from starcluster import sshutils
 from starcluster import awsutils
 from starcluster import managers
+from starcluster import userdata
 from starcluster import exception
 from starcluster.logger import log
 
@@ -17,16 +19,11 @@ class NodeManager(managers.Manager):
     """
     Manager class for Node objects
     """
-    def ssh_to_node(self, node_id, user='root', command=None):
+    def ssh_to_node(self, node_id, user='root', command=None,
+                    forward_x11=False, forward_agent=False):
         node = self.get_node(node_id, user=user)
-        if command:
-            current_user = node.ssh.get_current_user()
-            node.ssh.switch_user(user)
-            node.ssh.execute(command, silent=False)
-            node.ssh.switch_user(current_user)
-            return node.ssh.get_last_status()
-        else:
-            node.shell(user=user)
+        return node.shell(user=user, command=command, forward_x11=forward_x11,
+                          forward_agent=forward_agent)
 
     def get_node(self, node_id, user='root'):
         """Factory for Node class"""
@@ -76,6 +73,7 @@ class Node(object):
         self._ssh = None
         self._num_procs = None
         self._memory = None
+        self._user_data = None
 
     def __repr__(self):
         return '<Node: %s (%s)>' % (self.alias, self.id)
@@ -96,6 +94,21 @@ class Node(object):
                 time.sleep(5)
 
     @property
+    def user_data(self):
+        if not self._user_data:
+            try:
+                raw = self._get_user_data()
+                self._user_data = userdata.unbundle_userdata(raw)
+            except IOError, e:
+                parent_cluster = self.parent_cluster
+                if self.parent_cluster:
+                    raise exception.IncompatibleCluster(parent_cluster)
+                else:
+                    raise exception.BaseException(
+                        "Error occurred unbundling userdata: %s" % e)
+        return self._user_data
+
+    @property
     def alias(self):
         """
         Fetches the node's alias stored in a tag from either the instance
@@ -105,24 +118,55 @@ class Node(object):
         if not self._alias:
             alias = self.tags.get('alias')
             if not alias:
-                user_data = self._get_user_data(tries=5)
-                aliases = user_data.split('|')
+                aliasestxt = self.user_data.get(static.UD_ALIASES_FNAME)
+                aliases = aliasestxt.splitlines()[2:]
                 index = self.ami_launch_index
                 try:
                     alias = aliases[index]
                 except IndexError:
-                    log.debug(
-                        "invalid user_data: %s (index: %d)" % (aliases, index))
                     alias = None
+                    log.debug("invalid aliases file in user_data:\n%s" %
+                              aliasestxt)
                 if not alias:
                     raise exception.BaseException(
                         "instance %s has no alias" % self.id)
                 self.add_tag('alias', alias)
-            name = self.tags.get('Name')
-            if not name:
+            if not self.tags.get('Name'):
                 self.add_tag('Name', alias)
             self._alias = alias
         return self._alias
+
+    def get_plugins(self):
+        plugstxt = self.user_data.get(static.UD_PLUGINS_FNAME)
+        payload = plugstxt.split('\n', 2)[2]
+        plugins_metadata = utils.decode_uncompress_load(payload)
+        plugs = []
+        for klass, args, kwargs in plugins_metadata:
+            mod_path, klass_name = klass.rsplit('.', 1)
+            try:
+                mod = __import__(mod_path, fromlist=[klass_name])
+                plug = getattr(mod, klass_name)(*args, **kwargs)
+            except SyntaxError, e:
+                raise exception.PluginSyntaxError(
+                    "Plugin %s (%s) contains a syntax error at line %s" %
+                    (klass_name, e.filename, e.lineno))
+            except ImportError, e:
+                raise exception.PluginLoadError(
+                    "Failed to import plugin %s: %s" %
+                    (klass_name, e[0]))
+            except Exception as exc:
+                log.error("Error occured:", exc_info=True)
+                raise exception.PluginLoadError(
+                    "Failed to load plugin %s with "
+                    "the following error: %s - %s" %
+                    (klass_name, exc.__class__.__name__, exc.message))
+            plugs.append(plug)
+        return plugs
+
+    def get_volumes(self):
+        volstxt = self.user_data.get(static.UD_VOLUMES_FNAME)
+        payload = volstxt.split('\n', 2)[2]
+        return utils.decode_uncompress_load(payload)
 
     def _remove_all_tags(self):
         tags = self.tags.keys()[:]
@@ -153,13 +197,10 @@ class Node(object):
 
     @property
     def parent_cluster(self):
-        cluster_tag = "--UNKNOWN--"
         try:
-            cg = self.cluster_groups[0].name
-            cluster_tag = cg.replace(static.SECURITY_GROUP_PREFIX + '-', '')
+            return self.cluster_groups[0]
         except IndexError:
             pass
-        return cluster_tag
 
     @property
     def num_processors(self):
@@ -328,8 +369,8 @@ class Node(object):
             key = name
             if key_by_uid:
                 key = uid
-            user_map[key] = utils.struct_passwd([name, passwd, uid, gid,
-                                               gecos, home, shell])
+            user_map[key] = utils.struct_passwd([name, passwd, uid, gid, gecos,
+                                                 home, shell])
         return user_map
 
     def getgrgid(self, gid):
@@ -409,6 +450,7 @@ class Node(object):
         ssh_folder = posixpath.join(home_folder, '.ssh')
         if not self.ssh.isdir(ssh_folder):
             self.ssh.mkdir(ssh_folder)
+        self.ssh.chown(user.pw_uid, user.pw_gid, ssh_folder)
         private_key = posixpath.join(ssh_folder, 'id_rsa')
         public_key = private_key + '.pub'
         authorized_keys = posixpath.join(ssh_folder, 'authorized_keys')
@@ -475,8 +517,8 @@ class Node(object):
         for node in nodes:
             server_pkey = node.ssh.get_server_public_key()
             node_names = {}.fromkeys([node.alias, node.private_dns_name,
-                                       node.private_dns_name_short],
-                                      node.private_ip_address)
+                                      node.private_dns_name_short],
+                                     node.private_ip_address)
             node_names[node.public_dns_name] = node.ip_address
             for name, ip in node_names.items():
                 name_ip = "%s,%s" % (name, ip)
@@ -653,6 +695,56 @@ class Node(object):
             dev, on_label, path, type_label, fstype, options = line.split()
             mount_map[dev] = [path, fstype, options]
         return mount_map
+
+    def get_device_map(self):
+        """
+        Returns a dictionary mapping devices->(# of blocks) based on
+        /proc/partitions
+        """
+        parts = self.ssh.remote_file('/proc/partitions', 'r').read()
+        dev_regex = '(?:xv|s)d[a-z]'
+        part_regex = '\d+(?:p\d+)?'
+        r = re.compile('(\d+)\s+(%s)(%s)?(?:\s+|\\n)' %
+                       (dev_regex, part_regex))
+        entries = r.findall(parts)
+        devmap = {}
+        partmap = {}
+        for blocks, root_dev_name, partition in entries:
+            root_dev_file = '/dev/' + root_dev_name
+            devfile = root_dev_file + partition
+            if self.ssh.path_exists(devfile):
+                blocks = int(blocks)
+                if partition:
+                    partmap[devfile] = (root_dev_file, blocks)
+                else:
+                    devmap[devfile] = blocks
+        # check for devices attached to the instance with a partition's naming
+        # scheme (e.g. /dev/xvdb1)
+        for dev in partmap:
+            root_dev_file, blocks = partmap[dev]
+            # if a device exists with a partition naming scheme, then the root
+            # device name, e.g. /dev/xvdb for /dev/xvdb1, will not exist
+            if not root_dev_file in devmap:
+                devmap[dev] = blocks
+        return devmap
+
+    def get_partition_map(self):
+        """
+        Returns a dictionary mapping partitions->(start, end, blocks, id) based
+        on 'fdisk -l'
+        """
+        fdiskout = '\n'.join(self.ssh.execute("fdisk -l 2>/dev/null"))
+        part_regex = '/dev/(?:xv|s)d[a-z]\d+(?:p\d+)?'
+        r = re.compile('(%s)\s+'
+                       '(\d+)(?:[-+])?\s+'
+                       '(\d+)(?:[-+])?\s+'
+                       '(\d+)(?:[-+])?\s+'
+                       '(\d+)(?:[-+])?' % part_regex)
+        partmap = {}
+        for match in r.findall(fdiskout):
+            part, start, end, blocks, sys_id = match
+            partmap[part] = [int(start), int(end), int(blocks), sys_id]
+        return partmap
 
     def mount_device(self, device, path):
         """
@@ -851,6 +943,10 @@ class Node(object):
         except exception.SSHError:
             return False
 
+    def wait(self, interval=30):
+        while not self.is_up():
+            time.sleep(interval)
+
     def is_up(self):
         if self.update() != 'running':
             return False
@@ -886,7 +982,8 @@ class Node(object):
                                            private_key=self.key_location)
         return self._ssh
 
-    def shell(self, user=None, forward_x11=False, command=None):
+    def shell(self, user=None, forward_x11=False, forward_agent=False,
+              command=None):
         """
         Attempts to launch an interactive shell by first trying the system's
         ssh client. If the system does not have the ssh command it falls back
@@ -900,6 +997,7 @@ class Node(object):
             label = 'instance'
             if alias == "master":
                 label = "master"
+                alias = "node"
             elif alias:
                 label = "node"
             instance_id = alias or self.id
@@ -911,6 +1009,8 @@ class Node(object):
             sshopts = '-i %s' % self.key_location
             if forward_x11:
                 sshopts += ' -Y'
+            if forward_agent:
+                sshopts += ' -A'
             ssh_cmd = static.SSH_TEMPLATE % dict(opts=sshopts, user=user,
                                                  host=self.dns_name)
             if command:
@@ -922,10 +1022,13 @@ class Node(object):
             log.debug("Using Pure-Python SSH client")
             if forward_x11:
                 log.warn("X11 Forwarding not available in Python SSH client")
+            if forward_agent:
+                log.warn("Authentication agent forwarding not available in " +
+                         "Python SSH client")
             if command:
                 orig_user = self.ssh.get_current_user()
                 self.ssh.switch_user(user)
-                self.ssh.execute(command, silent=False, source_profile=True)
+                self.ssh.execute(command, silent=False)
                 self.ssh.switch_user(orig_user)
                 return self.ssh.get_last_status()
             self.ssh.interactive_shell(user=user)
@@ -954,6 +1057,46 @@ class Node(object):
         space
         """
         self.apt_command('install %s' % pkgs)
+
+    def yum_command(self, cmd):
+        """
+        Run a yum command with all necessary options for non-interactive use.
+        "-d 0 -e 0 -y"
+        """
+        yum_opts = ['-d', '0', '-e', '0', '-y']
+        cmd = "yum " + " ".join(yum_opts) + " " + cmd
+        self.ssh.execute(cmd)
+
+    def yum_install(self, pkgs):
+        """
+        Install a set of packages via yum.
+
+        pkgs is a string that contains one or more packages separated by a
+        space
+        """
+        self.yum_command('install %s' % pkgs)
+
+    @property
+    def package_provider(self):
+        """
+        In order to determine which packaging system to use, check to see if
+        /usr/bin/apt exists on the node, and use apt if it exists. Otherwise
+        test to see if /usr/bin/yum exists and use that.
+        """
+        if self.ssh.isfile('/usr/bin/apt'):
+            return "apt"
+        elif self.ssh.isfile('/usr/bin/yum'):
+            return "yum"
+
+    def package_install(self, pkgs):
+        """
+        Provides a declarative install packages on systems, regardless
+        of the system's packging type (apt/yum).
+        """
+        if self.package_provider == "apt":
+            self.apt_install(pkgs)
+        elif self.package_provider == "yum":
+            self.yum_install(pkgs)
 
     def __del__(self):
         if self._ssh:

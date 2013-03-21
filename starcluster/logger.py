@@ -2,11 +2,13 @@
 StarCluster logging module
 """
 import os
+import sys
+import glob
 import types
 import logging
 import logging.handlers
 import textwrap
-import StringIO
+import fileinput
 
 from starcluster import static
 
@@ -16,16 +18,18 @@ WARN = logging.WARN
 ERROR = logging.ERROR
 CRITICAL = logging.CRITICAL
 FATAL = logging.FATAL
+RAW = "raw"
 
-RAW_FORMAT = "%(message)s\n"
-INFO_FORMAT = " ".join(['>>>', "%(message)s\n"])
-_DEBUG_FORMAT = "%(filename)s:%(lineno)d - %(levelname)s - %(message)s\n"
-DEBUG_FORMAT = "%(asctime)s " + _DEBUG_FORMAT
-DEBUG_FORMAT_PID = ' '.join(["%(asctime)s", "PID: %s" % str(static.PID),
-                             _DEBUG_FORMAT])
-DEFAULT_CONSOLE_FORMAT = "%(levelname)s - %(message)s\n"
-ERROR_CONSOLE_FORMAT = " ".join(['!!!', DEFAULT_CONSOLE_FORMAT])
-WARN_CONSOLE_FORMAT = " ".join(['***', DEFAULT_CONSOLE_FORMAT])
+RAW_FORMAT = "%(message)s"
+INFO_FORMAT = " ".join([">>>", RAW_FORMAT])
+DEFAULT_CONSOLE_FORMAT = " - ".join(["%(levelname)s", RAW_FORMAT])
+ERROR_CONSOLE_FORMAT = " ".join(["!!!", DEFAULT_CONSOLE_FORMAT])
+WARN_CONSOLE_FORMAT = " ".join(["***", DEFAULT_CONSOLE_FORMAT])
+FILE_INFO_FORMAT = " - ".join(["%(filename)s:%(lineno)d",
+                               DEFAULT_CONSOLE_FORMAT])
+DEBUG_FORMAT = " ".join(["%(asctime)s", FILE_INFO_FORMAT])
+DEBUG_FORMAT_PID = " ".join(["%(asctime)s", "PID: %s" % str(static.PID),
+                             FILE_INFO_FORMAT])
 
 
 class ConsoleLogger(logging.StreamHandler):
@@ -37,16 +41,18 @@ class ConsoleLogger(logging.StreamHandler):
         ERROR: logging.Formatter(ERROR_CONSOLE_FORMAT),
         CRITICAL: logging.Formatter(ERROR_CONSOLE_FORMAT),
         FATAL: logging.Formatter(ERROR_CONSOLE_FORMAT),
-        'raw': logging.Formatter(RAW_FORMAT),
+        RAW: logging.Formatter(RAW_FORMAT),
     }
+
+    def __init__(self, stream=sys.stdout, error_stream=sys.stderr):
+        self.error_stream = error_stream or sys.stderr
+        logging.StreamHandler.__init__(self, stream or sys.stdout)
 
     def format(self, record):
         if hasattr(record, '__raw__'):
-            result = self.formatters['raw'].format(record)
+            result = self.formatters[RAW].format(record)
         else:
             result = self.formatters[record.levelno].format(record)
-        if hasattr(record, '__nonewline__'):
-            result = result.rstrip()
         return result
 
     def _wrap(self, msg):
@@ -69,15 +75,21 @@ class ConsoleLogger(logging.StreamHandler):
 
     def _emit(self, record):
         msg = self.format(record)
-        fs = "%s"
+        fs = "%s\n"
+        if hasattr(record, '__nonewline__'):
+            msg = msg.rstrip()
+            fs = "%s"
+        stream = self.stream
+        if record.levelno in [ERROR, CRITICAL, FATAL]:
+            stream = self.error_stream
         if not hasattr(types, "UnicodeType"):
              # if no unicode support...
-            self.stream.write(fs % msg)
+            stream.write(fs % msg)
         else:
             try:
-                self.stream.write(fs % msg)
+                stream.write(fs % msg)
             except UnicodeError:
-                self.stream.write(fs % msg.encode("UTF-8"))
+                stream.write(fs % msg.encode("UTF-8"))
         self.flush()
 
     def emit(self, record):
@@ -105,7 +117,6 @@ def get_starcluster_logger():
 
 log = get_starcluster_logger()
 console = ConsoleLogger()
-session = logging.StreamHandler(StringIO.StringIO())
 
 
 def configure_sc_logging(use_syslog=False):
@@ -122,7 +133,7 @@ def configure_sc_logging(use_syslog=False):
     /dev/log exists on the system (standard for most Linux distros)
     """
     log.setLevel(logging.DEBUG)
-    formatter = logging.Formatter(DEBUG_FORMAT_PID.rstrip())
+    formatter = logging.Formatter(DEBUG_FORMAT_PID)
     static.create_sc_config_dirs()
     rfh = logging.handlers.RotatingFileHandler(static.DEBUG_FILE,
                                                maxBytes=1048576,
@@ -132,9 +143,6 @@ def configure_sc_logging(use_syslog=False):
     log.addHandler(rfh)
     console.setLevel(logging.INFO)
     log.addHandler(console)
-    session.setLevel(logging.DEBUG)
-    session.setFormatter(formatter)
-    log.addHandler(session)
     syslog_device = '/dev/log'
     if use_syslog and os.path.exists(syslog_device):
         log.debug("Logging to %s" % syslog_device)
@@ -180,3 +188,26 @@ def configure_boto_logging():
     date_format = '%Y%m%d-%H:%M:%S'
     lh.setFormatter(logging.Formatter(format, date_format))
     l.addHandler(lh)
+
+
+def get_log_for_pid(pid):
+    """
+    Fetches the logs from the debug log file for a given StarCluster run by PID
+    """
+    found_pid = False
+    pid_str = ' PID: %s ' % pid
+    for line in fileinput.input(glob.glob(static.DEBUG_FILE + '*')):
+        if pid_str in line:
+            yield line
+            found_pid = True
+        elif found_pid and not ' PID: ' in line:
+            yield line
+        else:
+            found_pid = False
+
+
+def get_session_log():
+    """
+    Fetches the logs for the current active session from the debug log file.
+    """
+    return get_log_for_pid(static.PID)
