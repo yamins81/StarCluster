@@ -4,6 +4,7 @@ import datetime
 import traceback
 import string
 import xml.dom.minidom
+
 from starcluster import utils
 from starcluster import static
 from starcluster import exception
@@ -145,6 +146,7 @@ class SGEStats(object):
         calculates some statistics.
         Takes the string to parse, and a datetime object of the remote
         host's current time.
+
         """
         jobstats,num_new_jobs = sge_utils.parse_qacct(string,dtnow)
         for (jobid,hash) in jobstats.values():
@@ -422,7 +424,6 @@ class SGELoadBalancer(LoadBalancer):
             raise ValueError, 'Host group name must start with "@".'
         self.host_group = host_group
         self.slots = slots
-        
 
     @property
     def visualizer(self):
