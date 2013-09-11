@@ -1,3 +1,20 @@
+# Copyright 2009-2013 Justin Riley
+#
+# This file is part of StarCluster.
+#
+# StarCluster is free software: you can redistribute it and/or modify it under
+# the terms of the GNU Lesser General Public License as published by the Free
+# Software Foundation, either version 3 of the License, or (at your option) any
+# later version.
+#
+# StarCluster is distributed in the hope that it will be useful, but WITHOUT
+# ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+# FOR A PARTICULAR PURPOSE. See the GNU Lesser General Public License for more
+# details.
+#
+# You should have received a copy of the GNU Lesser General Public License
+# along with StarCluster. If not, see <http://www.gnu.org/licenses/>.
+
 from starcluster import clustersetup
 from starcluster.templates import sge
 from starcluster.logger import log
@@ -39,23 +56,21 @@ class SGEPlugin(clustersetup.DefaultClusterSetup):
         queue - configure queue to use the new parallel environment
         """
         mssh = self._master.ssh
-        pe_exists = mssh.get_status('qconf -sp %s' % name)
-        pe_exists = pe_exists == 0
-        verb = 'Updating'
-        if not pe_exists:
-            verb = 'Creating'
+        pe_exists = mssh.get_status('qconf -sp %s' % name) == 0
+        verb = 'Updating' if pe_exists else 'Creating'
         log.info("%s SGE parallel environment '%s'" % (verb, name))
         # iterate through each machine and count the number of processors
         nodes = nodes or self._nodes
         num_processors = sum(self.pool.map(lambda n: n.num_processors, nodes,
                                            jobid_fn=lambda n: n.alias))
-        penv = mssh.remote_file("/tmp/pe.txt", "w")
-        penv.write(sge.sge_pe_template % (name, num_processors))
-        penv.close()
         if not pe_exists:
+            penv = mssh.remote_file("/tmp/pe.txt", "w")
+            penv.write(sge.sge_pe_template % (name, num_processors))
+            penv.close()
             mssh.execute("qconf -Ap %s" % penv.name)
         else:
-            mssh.execute("qconf -Mp %s" % penv.name)
+            mssh.execute("qconf -mattr pe slots %s %s" %
+                         (num_processors, name))
         if queue:
             log.info("Adding parallel environment '%s' to queue '%s'" %
                      (name, queue))
